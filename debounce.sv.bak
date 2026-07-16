@@ -1,0 +1,61 @@
+// =============================================================================
+// debounce.sv
+// -----------------------------------------------------------------------------
+// Filtra o ruido mecanico de uma chave/botao e gera:
+//   - d_out   : nivel "limpo" (estavel) do sinal
+//   - d_pulse : pulso de 1 ciclo de clock na borda de SUBIDA do sinal limpo
+//
+// Usado para TODAS as entradas mecanicas do projeto:
+//   Liga/Desliga, Reset, Inicio (usamos so d_out -> nivel)
+//   Verde/Vermelho/Azul/Amarelo (usamos so d_pulse -> evento de aperto)
+//
+// Tecnica: só aceita uma mudança de nível depois que o sinal ficar estável
+// por DEBOUNCE_MS milissegundos (contador que reinicia toda vez que o sinal
+// bruto muda antes de completar a contagem).
+// =============================================================================
+
+module debounce #(
+    parameter integer CLK_FREQ_HZ = 50_000_000,
+    parameter integer DEBOUNCE_MS = 10
+)(
+    input  logic clk,
+    input  logic rst_n,
+    input  logic d_in,      // sinal bruto (ja no nivel logico correto: 1 = pressionado/ligado)
+    output logic d_out,     // sinal limpo
+    output logic d_pulse    // pulso de 1 ciclo quando d_out sobe de 0 para 1
+);
+
+    localparam integer MAX_COUNT = (CLK_FREQ_HZ / 1000) * DEBOUNCE_MS;
+    localparam integer CW = (MAX_COUNT <= 1) ? 1 : $clog2(MAX_COUNT + 1);
+
+    logic [CW-1:0] counter;
+    logic          d_out_prev;
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            counter <= '0;
+            d_out   <= 1'b0;
+        end else if (d_in != d_out) begin
+            // sinal bruto difere do que esta estabilizado: conta tempo de estabilidade
+            if (counter >= MAX_COUNT[CW-1:0]) begin
+                d_out   <= d_in;
+                counter <= '0;
+            end else begin
+                counter <= counter + 1'b1;
+            end
+        end else begin
+            counter <= '0;
+        end
+    end
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            d_out_prev <= 1'b0;
+            d_pulse    <= 1'b0;
+        end else begin
+            d_out_prev <= d_out;
+            d_pulse    <= d_out & ~d_out_prev;
+        end
+    end
+
+endmodule

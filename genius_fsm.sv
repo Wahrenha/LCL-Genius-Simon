@@ -1,0 +1,204 @@
+module genius_fsm #(
+    parameter integer FREQ_CLOCK_HZ = 50_000_000,
+    parameter integer MAX_SEQUENCIA = 8,
+    parameter integer TEMPO_MOSTRA_MS = 500,
+    parameter integer TEMPO_INTERVALO_MS = 200,
+    parameter integer TEMPO_RESPOSTA_MS = 300,
+    parameter integer TEMPO_BIPE_MS = 150,
+    parameter integer TEMPO_LIMITE_S = 5,
+    parameter integer TEMPO_PISCA_MS = 200,
+    parameter integer NUM_PISCADAS = 6
+)(
+    input  logic       clk,
+    input  logic       ligado,
+    input  logic       pulso_reset,
+    input  logic       inicio_jogo,
+    input  logic [3:0] pulso_botao,
+    input  logic [1:0] bits_aleatorios,
+
+    output logic [3:0] cor_led,
+    output logic       toca_som,
+    output logic       som_derrota,
+    output logic       pontuacao_soma10,
+    output logic       pontuacao_zera,
+    output logic       leds_derrota_acesos,
+    output logic       pulso_derrota
+);
+
+    typedef enum logic [3:0] {
+        E_INICIO           = 4'd0,
+        E_NOVA_COR         = 4'd1,
+        E_MOSTRA_LIGADO    = 4'd2,
+        E_MOSTRA_DESLIGADO = 4'd3,
+        E_ESPERA_JOGADOR   = 4'd4,
+        E_RESPOSTA_BOTAO   = 4'd5,
+        E_RODADA_OK        = 4'd6,
+        E_DERROTA          = 4'd7
+    } estado_t;
+
+    estado_t estado_atual, estado_anterior;
+
+    localparam logic [31:0] CICLOS_MOSTRA    = (FREQ_CLOCK_HZ/1000) * TEMPO_MOSTRA_MS;
+    localparam logic [31:0] CICLOS_INTERVALO = (FREQ_CLOCK_HZ/1000) * TEMPO_INTERVALO_MS;
+    localparam logic [31:0] CICLOS_RESPOSTA  = (FREQ_CLOCK_HZ/1000) * TEMPO_RESPOSTA_MS;
+    localparam logic [31:0] CICLOS_BIPE      = (FREQ_CLOCK_HZ/1000) * TEMPO_BIPE_MS;
+
+    logic [1:0] memoria_sequencia [0:MAX_SEQUENCIA-1];
+    logic [4:0] tamanho_sequencia;
+    logic [4:0] indice;
+    logic [31:0] cont_atraso;
+    logic [1:0] cor_confirmada;
+
+    logic       qualquer_botao;
+    logic [1:0] cor_botao;
+
+    always_comb begin
+        qualquer_botao = |pulso_botao;
+        if      (pulso_botao[0]) cor_botao = 2'd0;
+        else if (pulso_botao[1]) cor_botao = 2'd1;
+        else if (pulso_botao[2]) cor_botao = 2'd2;
+        else                     cor_botao = 2'd3;
+    end
+
+    logic hab_limite_tempo, reseta_limite_tempo, estouro_tempo;
+    assign hab_limite_tempo = (estado_atual == E_ESPERA_JOGADOR) && ligado && inicio_jogo;
+
+    timer_5s #(
+        .FREQ_CLOCK_HZ  (FREQ_CLOCK_HZ),
+        .TEMPO_LIMITE_S (TEMPO_LIMITE_S)
+    ) u_timer_5s (
+        .clk      (clk),
+        .enable   (hab_limite_tempo),
+        .reinicia (reseta_limite_tempo),
+        .timeout  (estouro_tempo)
+    );
+
+    logic inicia_pisca;
+
+    pisca #(
+        .FREQ_CLOCK_HZ  (FREQ_CLOCK_HZ),
+        .TEMPO_PISCA_MS (TEMPO_PISCA_MS),
+        .NUM_PISCADAS   (NUM_PISCADAS)
+    ) u_pisca (
+        .clk         (clk),
+        .start       (inicia_pisca),
+        .leds_acesos (leds_derrota_acesos),
+        .ocupado     ()
+    );
+
+    always_ff @(posedge clk) begin
+        estado_anterior     <= estado_atual;
+        pontuacao_soma10    <= 1'b0;
+        reseta_limite_tempo <= 1'b0;
+        inicia_pisca        <= 1'b0;
+
+        if (!ligado) begin
+            estado_atual      <= E_INICIO;
+            tamanho_sequencia <= '0;
+            indice            <= '0;
+            cont_atraso       <= '0;
+        end else if (estado_atual == E_INICIO || estado_atual == E_DERROTA || inicio_jogo) begin
+            case (estado_atual)
+
+                E_INICIO: begin
+                    if (inicio_jogo)
+                        estado_atual <= E_NOVA_COR;
+                end
+
+                E_NOVA_COR: begin
+                    if (tamanho_sequencia < MAX_SEQUENCIA[4:0]) begin
+                        memoria_sequencia[tamanho_sequencia] <= bits_aleatorios;
+                        tamanho_sequencia                    <= tamanho_sequencia + 1'b1;
+                    end
+                    indice       <= '0;
+                    cont_atraso  <= '0;
+                    estado_atual <= E_MOSTRA_LIGADO;
+                end
+
+                E_MOSTRA_LIGADO: begin
+                    if (cont_atraso >= CICLOS_MOSTRA) begin
+                        cont_atraso  <= '0;
+                        estado_atual <= E_MOSTRA_DESLIGADO;
+                    end else
+                        cont_atraso <= cont_atraso + 1'b1;
+                end
+
+                E_MOSTRA_DESLIGADO: begin
+                    if (cont_atraso >= CICLOS_INTERVALO) begin
+                        cont_atraso <= '0;
+                        if ((indice + 1'b1) < tamanho_sequencia) begin
+                            indice       <= indice + 1'b1;
+                            estado_atual <= E_MOSTRA_LIGADO;
+                        end else begin
+                            indice              <= '0;
+                            reseta_limite_tempo <= 1'b1;
+                            estado_atual        <= E_ESPERA_JOGADOR;
+                        end
+                    end else
+                        cont_atraso <= cont_atraso + 1'b1;
+                end
+
+                E_ESPERA_JOGADOR: begin
+                    if (estouro_tempo) begin
+                        estado_atual <= E_DERROTA;
+                    end else if (qualquer_botao) begin
+                        if (cor_botao == memoria_sequencia[indice]) begin
+                            cor_confirmada   <= cor_botao;
+                            pontuacao_soma10 <= 1'b1;
+                            cont_atraso      <= '0;
+                            estado_atual     <= E_RESPOSTA_BOTAO;
+                        end else
+                            estado_atual <= E_DERROTA;
+                    end
+                end
+
+                E_RESPOSTA_BOTAO: begin
+                    if (cont_atraso >= CICLOS_RESPOSTA) begin
+                        cont_atraso <= '0;
+                        if ((indice + 1'b1) < tamanho_sequencia) begin
+                            indice              <= indice + 1'b1;
+                            reseta_limite_tempo <= 1'b1;
+                            estado_atual        <= E_ESPERA_JOGADOR;
+                        end else
+                            estado_atual <= E_RODADA_OK;
+                    end else
+                        cont_atraso <= cont_atraso + 1'b1;
+                end
+
+                E_RODADA_OK:
+                    estado_atual <= E_NOVA_COR;
+
+                E_DERROTA: begin
+                    if (estado_anterior != E_DERROTA)
+                        inicia_pisca <= 1'b1;
+                end
+
+                default: estado_atual <= E_INICIO;
+            endcase
+        end
+
+        if (ligado && pulso_reset) begin
+            estado_atual      <= E_INICIO;
+            tamanho_sequencia <= '0;
+            indice            <= '0;
+            cont_atraso       <= '0;
+        end
+    end
+
+    assign pontuacao_zera      = (estado_atual == E_INICIO) && (estado_anterior != E_INICIO);
+    assign pulso_derrota       = (estado_atual == E_DERROTA) && (estado_anterior != E_DERROTA);
+    assign som_derrota         = (estado_atual == E_DERROTA);
+    assign toca_som            = (estado_atual == E_MOSTRA_LIGADO  && cont_atraso < CICLOS_BIPE) ||
+                                 (estado_atual == E_RESPOSTA_BOTAO && cont_atraso < CICLOS_BIPE) ||
+                                 (estado_atual == E_DERROTA        && leds_derrota_acesos);
+
+    always_comb begin
+        cor_led = 4'b0000;
+        case (estado_atual)
+            E_MOSTRA_LIGADO:  cor_led[memoria_sequencia[indice]] = 1'b1;
+            E_RESPOSTA_BOTAO: cor_led[cor_confirmada]            = 1'b1;
+            default:          cor_led = 4'b0000;
+        endcase
+    end
+
+endmodule

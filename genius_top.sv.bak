@@ -1,0 +1,236 @@
+// =============================================================================
+// genius_top.sv
+// -----------------------------------------------------------------------------
+// Top-level do jogo Genius para o kit DE2. Junta:
+//   - debounce de todas as entradas mecanicas
+//   - LFSR (fonte de aleatoriedade)
+//   - game_fsm (a logica do jogo)
+//   - buzzer (square_wave)
+//   - pontuacao atual e maxima (score_bcd / score_max) + comparador
+//   - decodificadores de 7 segmentos
+//
+// MAPEAMENTO DE CHAVES/BOTOES (ajuste os nomes/numeros conforme o seu
+// kit, mas mantenha a ideia):
+//   SW[0]   = Liga/Desliga
+//   SW[1]   = Reset   (da um pulso pra cima e pra baixo -> zera so a atual)
+//   SW[2]   = Inicio  (1 = rodando, 0 = pausado)
+//   SW[4:3] = Habilidade (00=nivel1/8, 01=nivel2/14, 10=nivel3/20, 11=nivel4/31)
+//   KEY[0]  = reset de HARDWARE (ativo baixo) -- zera TODOS os registradores,
+//             inclusive a pontuacao maxima. Diferente do "Reset" do jogo!
+//   KEY[3:1] = livres / nao usados neste projeto
+//
+// Os 4 botoes de cor e os 4 LEDs de cor NAO sao os componentes onboard da
+// DE2 -- pelo enunciado, eles ficam no Kit Logico (protoboard), ligados via
+// header GPIO. Os nomes GPIO_* abaixo sao logicos; va no Pin Planner do
+// Quartus e atribua os pinos fisicos do seu GPIO (ex.: GPIO_0[0], GPIO_0[1]...)
+// a cada um deles, conforme a fiacao que voce montou.
+//
+// ATENCAO - POLARIDADE: este codigo assume que os botoes de cor ficam em
+// 1 logico QUANDO PRESSIONADOS (pull-down + botao liga pra 3.3V). Se a sua
+// fiacao for o contrario (pull-up, botao liga pra GND), troque
+// "GPIO_BTN_xxx" por "~GPIO_BTN_xxx" nas 4 linhas de debounce abaixo.
+// =============================================================================
+
+module genius_top #(
+    parameter integer CLK_FREQ_HZ = 50_000_000,
+    parameter integer SHOW_MS     = 500,
+    parameter integer GAP_MS      = 200,
+    parameter integer FEEDBACK_MS = 300,
+    parameter integer BIP_MS      = 150,
+    parameter integer TIMEOUT_S   = 5,
+    parameter integer BLINK_MS    = 200,
+    parameter integer N_BLINKS    = 6
+)(
+    input  logic        CLOCK_50,
+    input  logic [17:0] SW,
+    input  logic [3:0]  KEY,          // ativo em nivel baixo
+
+    output logic [17:0] LEDR,
+    output logic [8:0]  LEDG,
+    output logic [6:0]  HEX0, HEX1, HEX2, HEX3, HEX4, HEX5, HEX6, HEX7,
+
+    // ---- Sinais externos via Kit Logico / header GPIO ----
+    input  logic         GPIO_BTN_VERDE,
+    input  logic         GPIO_BTN_VERMELHO,
+    input  logic         GPIO_BTN_AZUL,
+    input  logic         GPIO_BTN_AMARELO,
+    output logic         GPIO_LED_VERDE,
+    output logic         GPIO_LED_VERMELHO,
+    output logic         GPIO_LED_AZUL,
+    output logic         GPIO_LED_AMARELO,
+    output logic         GPIO_BUZZER
+);
+
+    // ---------------------------------------------------------------
+    // Reset de hardware e chaves principais
+    // ---------------------------------------------------------------
+    logic rst_n;
+    assign rst_n = KEY[0];   // KEY ativo baixo -> ja serve direto como rst_n
+
+    logic power_on, start_level, reset_pulse;
+    logic [3:0] btn_pulse;
+    logic [1:0] skill_level;
+
+    assign skill_level = SW[4:3];
+
+    debounce #(.CLK_FREQ_HZ(CLK_FREQ_HZ)) u_db_power (
+        .clk(CLOCK_50), .rst_n(rst_n), .d_in(SW[0]), .d_out(power_on), .d_pulse()
+    );
+
+    debounce #(.CLK_FREQ_HZ(CLK_FREQ_HZ)) u_db_reset (
+        .clk(CLOCK_50), .rst_n(rst_n), .d_in(SW[1]), .d_out(), .d_pulse(reset_pulse)
+    );
+
+    debounce #(.CLK_FREQ_HZ(CLK_FREQ_HZ)) u_db_start (
+        .clk(CLOCK_50), .rst_n(rst_n), .d_in(SW[2]), .d_out(start_level), .d_pulse()
+    );
+
+    debounce #(.CLK_FREQ_HZ(CLK_FREQ_HZ)) u_db_verde (
+        .clk(CLOCK_50), .rst_n(rst_n), .d_in(GPIO_BTN_VERDE), .d_out(), .d_pulse(btn_pulse[0])
+    );
+    debounce #(.CLK_FREQ_HZ(CLK_FREQ_HZ)) u_db_vermelho (
+        .clk(CLOCK_50), .rst_n(rst_n), .d_in(GPIO_BTN_VERMELHO), .d_out(), .d_pulse(btn_pulse[1])
+    );
+    debounce #(.CLK_FREQ_HZ(CLK_FREQ_HZ)) u_db_azul (
+        .clk(CLOCK_50), .rst_n(rst_n), .d_in(GPIO_BTN_AZUL), .d_out(), .d_pulse(btn_pulse[2])
+    );
+    debounce #(.CLK_FREQ_HZ(CLK_FREQ_HZ)) u_db_amarelo (
+        .clk(CLOCK_50), .rst_n(rst_n), .d_in(GPIO_BTN_AMARELO), .d_out(), .d_pulse(btn_pulse[3])
+    );
+
+    // ---------------------------------------------------------------
+    // Fonte de aleatoriedade
+    // ---------------------------------------------------------------
+    logic [7:0] lfsr_val;
+    lfsr_rand u_lfsr (.clk(CLOCK_50), .rst_n(rst_n), .value(lfsr_val));
+
+    // ---------------------------------------------------------------
+    // Maquina de estados do jogo
+    // ---------------------------------------------------------------
+    logic [3:0] led_color;
+    logic       tone_on, tone_is_lose;
+    logic       score_add10, score_clear_fsm;
+    logic       lose_leds_on;
+    logic       round_lost_pulse;
+
+    game_fsm #(
+        .CLK_FREQ_HZ (CLK_FREQ_HZ),
+        .SHOW_MS     (SHOW_MS),
+        .GAP_MS      (GAP_MS),
+        .FEEDBACK_MS (FEEDBACK_MS),
+        .BIP_MS      (BIP_MS),
+        .TIMEOUT_S   (TIMEOUT_S),
+        .BLINK_MS    (BLINK_MS),
+        .N_BLINKS    (N_BLINKS)
+    ) u_fsm (
+        .clk              (CLOCK_50),
+        .rst_n            (rst_n),
+        .power_on         (power_on),
+        .reset_pulse      (reset_pulse),
+        .start_level      (start_level),
+        .skill_level      (skill_level),
+        .btn_pulse        (btn_pulse),
+        .rand_bits        (lfsr_val[1:0]),
+        .led_color        (led_color),
+        .tone_on          (tone_on),
+        .tone_is_lose     (tone_is_lose),
+        .score_add10      (score_add10),
+        .score_clear      (score_clear_fsm),
+        .lose_leds_on     (lose_leds_on),
+        .round_lost_pulse (round_lost_pulse)
+    );
+
+    // ---------------------------------------------------------------
+    // LEDs de cor (externos) e LEDR/LEDG (derrota) -- apagados se desligado
+    // ---------------------------------------------------------------
+    assign GPIO_LED_VERDE    = power_on ? led_color[0] : 1'b0;
+    assign GPIO_LED_VERMELHO = power_on ? led_color[1] : 1'b0;
+    assign GPIO_LED_AZUL     = power_on ? led_color[2] : 1'b0;
+    assign GPIO_LED_AMARELO  = power_on ? led_color[3] : 1'b0;
+
+    logic ledr_ledg_on;
+    assign ledr_ledg_on = power_on && lose_leds_on;
+    assign LEDR = {18{ledr_ledg_on}};
+    assign LEDG = {9{ledr_ledg_on}};
+
+    // ---------------------------------------------------------------
+    // Buzzer: bip curto (880 Hz) na sequencia/acerto, tom grave (220 Hz) na derrota
+    // ---------------------------------------------------------------
+    logic [19:0] tone_freq;
+    assign tone_freq = tone_is_lose ? 20'd220 : 20'd880;
+
+    square_wave #(.CLK_FREQ_HZ(CLK_FREQ_HZ)) u_buzzer (
+        .clk      (CLOCK_50),
+        .rst_n    (rst_n),
+        .enable   (tone_on && power_on),
+        .freq_hz  (tone_freq),
+        .wave_out (GPIO_BUZZER)
+    );
+
+    // ---------------------------------------------------------------
+    // Pontuacao atual e maxima
+    // ---------------------------------------------------------------
+    logic score_clear_top;
+    assign score_clear_top = !power_on || reset_pulse || score_clear_fsm;
+
+    logic [3:0] cur_d0, cur_d1, cur_d2, cur_d3;
+    score_bcd u_score_cur (
+        .clk(CLOCK_50), .rst_n(rst_n),
+        .clear(score_clear_top), .add10(score_add10),
+        .d0(cur_d0), .d1(cur_d1), .d2(cur_d2), .d3(cur_d3)
+    );
+
+    logic [3:0] max_d0, max_d1, max_d2, max_d3;
+    logic current_gt_max, max_load;
+
+    // Comparador BCD de 4 digitos (do mais significativo para o menos)
+    function automatic logic gt4 (
+        logic [3:0] a3, logic [3:0] a2, logic [3:0] a1, logic [3:0] a0,
+        logic [3:0] b3, logic [3:0] b2, logic [3:0] b1, logic [3:0] b0
+    );
+        if (a3 != b3) return (a3 > b3);
+        if (a2 != b2) return (a2 > b2);
+        if (a1 != b1) return (a1 > b1);
+        return (a0 > b0);
+    endfunction
+
+    assign current_gt_max = gt4(cur_d3, cur_d2, cur_d1, cur_d0,
+                                 max_d3, max_d2, max_d1, max_d0);
+    assign max_load = round_lost_pulse && current_gt_max;
+
+    score_max u_score_max (
+        .clk(CLOCK_50), .rst_n(rst_n), .power_on(power_on),
+        .load(max_load),
+        .load_d0(cur_d0), .load_d1(cur_d1), .load_d2(cur_d2), .load_d3(cur_d3),
+        .d0(max_d0), .d1(max_d1), .d2(max_d2), .d3(max_d3)
+    );
+
+    // ---------------------------------------------------------------
+    // Displays de 7 segmentos
+    //   HEX7..HEX4 = Pontuacao MAXIMA  (milhar,centena,dezena,unidade)
+    //   HEX3..HEX0 = Pontuacao ATUAL   (milhar,centena,dezena,unidade)
+    // ---------------------------------------------------------------
+    logic [6:0] seg_max3, seg_max2, seg_max1, seg_max0;
+    logic [6:0] seg_cur3, seg_cur2, seg_cur1, seg_cur0;
+
+    seg7_decoder d_max3 (.bcd(max_d3), .seg(seg_max3));
+    seg7_decoder d_max2 (.bcd(max_d2), .seg(seg_max2));
+    seg7_decoder d_max1 (.bcd(max_d1), .seg(seg_max1));
+    seg7_decoder d_max0 (.bcd(max_d0), .seg(seg_max0));
+    seg7_decoder d_cur3 (.bcd(cur_d3), .seg(seg_cur3));
+    seg7_decoder d_cur2 (.bcd(cur_d2), .seg(seg_cur2));
+    seg7_decoder d_cur1 (.bcd(cur_d1), .seg(seg_cur1));
+    seg7_decoder d_cur0 (.bcd(cur_d0), .seg(seg_cur0));
+
+    localparam logic [6:0] SEG_OFF = 7'b1111111;
+
+    assign HEX7 = power_on ? seg_max3 : SEG_OFF;
+    assign HEX6 = power_on ? seg_max2 : SEG_OFF;
+    assign HEX5 = power_on ? seg_max1 : SEG_OFF;
+    assign HEX4 = power_on ? seg_max0 : SEG_OFF;
+    assign HEX3 = power_on ? seg_cur3 : SEG_OFF;
+    assign HEX2 = power_on ? seg_cur2 : SEG_OFF;
+    assign HEX1 = power_on ? seg_cur1 : SEG_OFF;
+    assign HEX0 = power_on ? seg_cur0 : SEG_OFF;
+
+endmodule
