@@ -27,7 +27,9 @@ The project is divided in the following files:
 
 How to run:
     Install the Quartus II simulator;
-    Clone this repository: git clone [https://github.com/Wahrenha/LCL-Genius-Simon.git](https://github.com/Wahrenha/LCL-Genius-Simon.git) ;
+    Clone this repository: 
+    '''bash
+    git clone [https://github.com/Wahrenha/LCL-Genius-Simon.git](https://github.com/Wahrenha/LCL-Genius-Simon.git) ;
     Open this project;
     Connect the DE2 kit with Quartus II; 
     In assignments -> import pin assignments, import DE2_pin_assignments.csv which is included in the repository, and make sure the pin planner matches the program inputs and outputs;
