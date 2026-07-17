@@ -50,10 +50,9 @@ The architecture is modular and divided into the following files:
 2. Clone this repository:
    ```bash
    git clone [https://github.com/Wahrenha/LCL-Genius-Simon.git](https://github.com/Wahrenha/LCL-Genius-Simon.git)
-'
-   Open this project;
-    Connect the DE2 kit with Quartus II; 
-    In assignments -> import pin assignments, import DE2_pin_assignments.csv which is included in the repository, and make sure the pin planner matches the program inputs and outputs;
-    Compile genius_top.sv;
-    Upload the compiled .sof file to the board using the Quartus Programmer;
-    Run the project.
+   ```
+3. **Open the project** (`.qpf` file) in Quartus II.
+4. **Connect the DE2 FPGA board** to your computer.
+5. **Import pin mappings:** Go to `Assignments` -> `Import Assignments...`, select `DE2_pin_assignments.csv` from the cloned repository, and ensure the Pin Planner configuration matches your physical setup.
+6. **Compile the top-level entity** `genius_top.sv`.
+7. **Upload the compiled `.sof` file** to the board using the **Quartus Programmer** tool.
